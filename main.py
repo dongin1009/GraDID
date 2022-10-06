@@ -7,7 +7,7 @@ from tqdm import tqdm
 import numpy as np
 import time
 from torch_geometric.loader import DataLoader
-from sklearn.metrics import accuracy_score, f1_score, roc_auc_score
+from sklearn.metrics import accuracy_score, f1_score, roc_auc_score, precision_score, recall_score
 from models import Gradid
 from utils import set_seed, format_time, CosineAnnealingWarmUpRestarts, EarlyStopping
 
@@ -21,22 +21,28 @@ def make_subgraph(embedding, label):
         subgraph_list.append(subgraph)
     return subgraph_list
 
-def construct_data(embedding_path, data_info, sentence_model):
-    train_sentence_embedding = np.load(f"{embedding_path}/{data_info}_train_{sentence_model.split('/')[-1]}.npy", allow_pickle=True)
-    valid_sentence_embedding = np.load(f"{embedding_path}/{data_info}_valid_{sentence_model.split('/')[-1]}.npy", allow_pickle=True)
-    test_sentence_embedding = np.load(f"{embedding_path}/{data_info}_test_{sentence_model.split('/')[-1]}.npy", allow_pickle=True)
-
-    train_label = np.load(f'data/{data_info}/train_label.npy')
-    valid_label = np.load(f'data/{data_info}/valid_label.npy')
-    test_label = np.load(f'data/{data_info}/test_label.npy')
+def construct_data(args):
+    data_info = args.data_info
     
-    train_graph = make_subgraph(train_sentence_embedding, train_label)
-    valid_graph = make_subgraph(valid_sentence_embedding, valid_label)
-    test_graph = make_subgraph(test_sentence_embedding, test_label)
-    
-    return train_graph, valid_graph, test_graph
+    if args.only_train:
+        split_list = ['train', 'valid']
+    elif args.only_test:
+        split_list = ['test']
+    else:
+        split_list = ['train', 'valid', 'test']
 
-def train(model, train_graph, valid_graph, test_graph, args):
+    try:
+        return_graph = []
+        for each_split in split_list:
+            sentence_embedding = np.load(f"{args.embedding_path}/{data_info}_{each_split}_{args.embedding_model}.npy", allow_pickle=True)
+            label = np.load(f'data/{data_info}/{each_split}_label.npy')
+            return_graph.append(make_subgraph(sentence_embedding, label))
+        return return_graph
+
+    except FileNotFoundError:
+        print("Cannot find saved embeddings. Please run 'python sentence_embedding.py' with needed sentence model & data")
+
+def train(model, train_graph, valid_graph, args):
     loss_fn = torch.nn.CrossEntropyLoss(reduction='sum')
     optimizer = torch.optim.Adam(model.parameters(), lr=0)
     scheduler = CosineAnnealingWarmUpRestarts(optimizer, T_0=len(train_graph)//args.batch_size, T_mult=2, eta_max=args.lr, T_up=10, gamma=0.8)
@@ -58,9 +64,9 @@ def train(model, train_graph, valid_graph, test_graph, args):
             epoch_loss += loss.item()
             optimizer.step()
             scheduler.step()
-            # wandb.log({"Train Loss": loss.item(), "lr": optimizer.param_groups[0]['lr']})
+
         train_loss = float(epoch_loss / len(train_graph))
-        valid_loss, valid_accuracy, valid_f1, valid_auroc = evaluate(model, valid_graph, True, args)
+        valid_loss, valid_accuracy, valid_f1, valid_auroc = evaluate(model, valid_graph, True, args.device, args)
         print(f"EPOCH: {epoch}  ||  Elapsed: {format_time(time.time()-t0)}.")
         print(f"   Train_loss: {train_loss:.4f} | Valid_loss: {valid_loss:.4f}  ||  Valid_acc: {valid_accuracy:.4f} | Valid_F1: {valid_f1:.4f} | Valid_auroc: {valid_auroc:.4f}")
         early_stopping(valid_loss, model)
@@ -70,18 +76,17 @@ def train(model, train_graph, valid_graph, test_graph, args):
             break
         epoch += 1
 
-    evaluate(model, test_graph, False, args)
-		
+
 def evaluate(model, eval_graph, is_valid, device, args):
     if is_valid:
         loss_fn = torch.nn.CrossEntropyLoss(reduction='sum')
         epoch_loss = 0.0
     else:
-        model.load_state_dict(torch.load(args.save_path))
+        model.load_state_dict(torch.load(args.load_path if args.load_path else args.save_path))
     eval_real_list, eval_pred_list, eval_score_list = [], [], []
     with torch.no_grad():
         model.eval()
-        for graph in DataLoader(eval_graph):
+        for graph in tqdm(DataLoader(eval_graph)):
             graph = graph.to(args.device)
             out = model(graph)
             if is_valid:
@@ -96,49 +101,67 @@ def evaluate(model, eval_graph, is_valid, device, args):
 
         eval_accuracy = accuracy_score(eval_real_list, eval_pred_list)
         eval_f1 = f1_score(eval_real_list, eval_pred_list, average='macro')
+        #eval_precision = precision_score(eval_real_list, eval_pred_list, pos_label=0)
+        #eval_recall = precision_score(eval_real_list, eval_pred_list, pos_label=0)
         eval_auroc = roc_auc_score(eval_real_list, eval_score_list)
         if is_valid:
             return float(epoch_loss / len(eval_graph)), eval_accuracy, eval_f1, eval_auroc
         else:
-            print(f'  Test_acc: {eval_accuracy:.4f}, Test_f1: {eval_f1:.4f}, Test_auroc: {eval_auroc:.4f}')
+            print()
+            print(f'  Test Acc: {eval_accuracy:.4f}, Test F1: {eval_f1:.4f}, Test AUROC: {eval_auroc:.4f}')
+            
+            #print(f'  Test Acc: {(eval_accuracy*100):.2f}%, Test Precision: {(eval_precision*100):.2f}%, Test Recall: {(eval_recall*100):.2f}%')
             
 
 def main():
-	parser = argparse.ArgumentParser()
-#	parser.add_argument("--in_channels", default=1024, type=int)
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--data_info", default='nela')
+
+    parser.add_argument("--embedding_model", default='all-roberta-large-v1')
+    parser.add_argument("--epochs", default=100, type=int)
+    parser.add_argument("--batch_size", default=64, type=int)
+    parser.add_argument("--lr", default=0.0001, type=float)
+    parser.add_argument("--weight_decay", default=5e-6, type=float)
+    parser.add_argument("--embedding_path", default='save_embedding/')
+    parser.add_argument("--save_path", default='save_checkpoint/')
+    
+    parser.add_argument("--earlystop_patience", default=10, type=int)
+    parser.add_argument("--rand_seed", default=None, type=int)
+    parser.add_argument("--only_train", action='store_true')
+    parser.add_argument("--only_test", action='store_true')
+    parser.add_argument("--load_path", default=None)
+
+#    parser.add_argument("--in_channels", type=int)
 #	parser.add_argument("--inter_channels", default=2048, type=int)
-	parser.add_argument("--mlp_dim", default=512, type=int)
-	parser.add_argument("--num_classes", default=2, type=int)
+    parser.add_argument("--mlp_dim", default=512, type=int)
+    parser.add_argument("--num_classes", default=2, type=int)
+    
+    parser.add_argument("--dropout_p", default=0.5, type=float)
+    parser.add_argument("--num_heads_1", default=4, type=int)
+    parser.add_argument("--num_heads_2", default=2, type=int)
+    
 
-	parser.add_argument("--dropout_p", default=0.5, type=float)
-	parser.add_argument("--num_heads_1", default=4, type=int)
-	parser.add_argument("--num_heads_2", default=2, type=int)
-
-	parser.add_argument("--data_info", default='nela')
-	parser.add_argument("--embedding_path", default='save_embedding/')
-	parser.add_argument("--embedding_model", default='all-roberta-large-v1')
-#	parser.add_argument("--save_path", default='save_checkpoint/best_model.pt')	
-	parser.add_argument("--epochs", default=100, type=int)
-	parser.add_argument("--batch_size", default=64, type=int)
-	parser.add_argument("--lr", default=0.0001, type=float)
-	parser.add_argument("--weight_decay", default=5e-6, type=float)
-
-	parser.add_argument("--earlystop_patience", default=10, type=int)
-	parser.add_argument("--rand_seed", default=None, type=int)
-	
+    
     args = parser.parse_args()
-    if args.rand_seed: # In experiemnts, we set seeds to [111, 222, 333, 444, 555]
-        set_seed(args.rand_seed)
+    args.embedding_model = args.embedding_model.split('/')[-1]
 
-	train_graph, valid_graph, test_graph = construct_data(args.embedding_path, args.data_info, args.embedding_model)
-	
+    #if args.rand_seed: # In experiements, we set seeds to [111, 222, 333, 444, 555]
+    set_seed(args.rand_seed)
+    print("[Load data...]")
+    graph_list = construct_data(args)
     args.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-	args.in_channels = train_graph[0].num_features
-	args.inter_channels = 2 * args.in_channels//args.num_heads_1
-	args.save_path = f'save_checkpoint/{args.embedding_model}_{args.lr}_{args.data_info}.pt'
-	model = Gratid(args).to(args.device)
+    args.in_channels = graph_list[0][0].num_features
+    args.inter_channels = 2 * args.in_channels//args.num_heads_1
+    if args.save_path is 'save_checkpoint/':
+        args.save_path = f'save_checkpoint/{args.embedding_model}_{args.lr}_{args.data_info}.pt'
+    model = Gradid(args).to(args.device)
 
-	train(model, train_graph, valid_graph, test_graph, args)
+    if not args.only_test:
+        train(model, graph_list[0], graph_list[1], args) # Train & Validation: train_graph, valid_graph
+    if not args.only_train:
+        print()
+        print('[Start test!!!]')
+        evaluate(model, graph_list[-1], False, args.device, args) # Test: test_graph
 
 if __name__ == "__main__":
     main()

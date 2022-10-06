@@ -7,9 +7,7 @@ class GnnLayer(torch.nn.Module):
 	def __init__(self, args):
 		super(GnnLayer, self).__init__()
 		self.conv1 = GATConv(args.in_channels, args.inter_channels, heads=args.num_heads_1, add_self_loops=False)
-		#self.conv1 = GATConv(in_channels, in_channels//2, heads=4, add_self_loops=False)
 		self.conv2 = GATConv(args.inter_channels * args.num_heads_1, args.in_channels//args.num_heads_2, heads=args.num_heads_2, add_self_loops=False)
-		#self.conv2 = GATConv(in_channels*2, in_channels//2, heads=2, add_self_loops=False)
 		self.device = args.device
 
 	def forward(self, graph):

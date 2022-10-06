@@ -6,6 +6,7 @@ from tqdm import tqdm
 import torch
 import re
 import os
+import argparse
 from nltk.tokenize import sent_tokenize
 
 from sklearn.model_selection import train_test_split
@@ -35,6 +36,28 @@ def sentence_embedding(sentence_model, doc, device):
 		embedding.append(temp_tensor)
 	return np.array(embedding, dtype=object)
 
+def data_selection(data_info, seq_level='paragraph'):
+	if data_info=='nela':
+		column_names = ['ind', 'headline', 'body', 'label']
+		train_df = pd.read_csv('data/nela/train.csv', names=column_names)
+		valid_df = pd.read_csv('data/nela/dev.csv', names=column_names)
+		test_df = pd.read_csv('data/nela/test.csv', names=column_names)
+		train_df, valid_df, test_df = remove_stopword(train_df, seq_level), remove_stopword(valid_df, seq_level), remove_stopword(test_df, seq_level)
+		return [train_df, valid_df, test_df]
+
+	elif data_info=='yh':
+		df = pd.read_csv('data/yh/yh_dataset.csv')
+		df.body = df.body.apply(sent_tokenize)
+		train_df, valid_df = train_test_split(df, test_size=0.2, random_state=42, stratify=df.label)
+		valid_df, test_df = train_test_split(valid_df, test_size=0.5, random_state=42, stratify=valid_df.label)
+		df_reset = lambda x: x.reset_index(drop=True)
+		train_df, valid_df, test_df = df_reset(train_df), df_reset(valid_df), df_reset(test_df)
+		return [train_df, valid_df, test_df]
+
+	else:
+		print("Unsupported data")
+
+
 def main():	
 	parser = argparse.ArgumentParser()
 	parser.add_argument("--data_info", default='nela', choices=['nela', 'yh'], type=str)
@@ -45,38 +68,18 @@ def main():
 	args = parser.parse_args()
 	device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 	model = SentenceTransformer(args.sentence_model)
-	if args.data_info=='nela':
-		column_names = ['ind', 'headline', 'body', 'label']
-		train_df = pd.read_csv('data/nela/train.csv', names=column_names)
-		valid_df = pd.read_csv('data/nela/dev.csv', names=column_names)
-		test_df = pd.read_csv('data/nela/test.csv', names=column_names)
-		seq_level = args.seq_level
-		train_df, valid_df, test_df = remove_stopword(train_df, seq_level), remove_stopword(valid_df, seq_level), remove_stopword(test_df, seq_level)
 
-	elif args.data_info=='yh':
-		df = pd.read_csv('data/yh/yh_shuffled.csv')
-		df.body = df.body.apply(sent_tokenize)
-		train_df, valid_df = train_test_split(df, test_size=0.2, random_state=42, stratify=df.label)
-		valid_df, test_df = train_test_split(valid_df, test_size=0.5, random_state=42, stratify=valid_df.label)
-		df_reset = lambda x: x.reset_index(drop=True)
-		train_df, valid_df, test_df = df_reset(train_df), df_reset(valid_df), df_reset(test_df)
+	df_list = data_selection(args.data_info, args.seq_level)
+	split_list = ['train', 'valid', 'test']
 
-	else:
-		print("Unsupported data")
-	
-	if not os.path.isfile(f'data/{args.data_info}/train_label.npy'):
-		np.save(f'data/{args.data_info}/train_label.npy', np.array(train_df.label))
-		np.save(f'data/{args.data_info}/valid_label.npy', np.array(valid_df.label))
-		np.save(f'data/{args.data_info}/test_label.npy', np.array(test_df.label))
+	for each_df, each_split in zip(df_list, split_list):
+		if not os.path.isfile(f'data/{args.data_info}/*_label.npy'):
+			np.save(f'data/{args.data_info}/{each_split}_label.npy', np.array(each_df.label))
 
-	train_embedding = sentence_embedding(model, train_df.body, device)
-	np.save(f'{args.output_path}/{args.data_info}_train_{args.sentence_model.split('/')[-1]}.npy', train_embedding)
-
-	valid_embedding = sentence_embedding(model, valid_df.body, device)
-	np.save(f'{args.output_path}/{args.data_info}_valid_{args.sentence_model.split('/')[-1]}.npy', valid_embedding)
-
-	test_embedding = sentence_embedding(model, test_df.body, device)
-	np.save(f'{args.output_path}/{args.data_info}_test_{args.sentence_model.split('/')[-1]}.npy', test_embedding)
+		embedding_path = f"{args.output_path}/{args.data_info}_{each_split}_{args.sentence_model.split('/')[-1]}.npy"
+		if not os.path.isfile(embedding_path):
+			each_embedding = sentence_embedding(model, each_df.body.values, device)
+			np.save(embedding_path, each_embedding)
 
 if __name__=='__main__':
 	main()

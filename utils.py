@@ -7,9 +7,10 @@ from torch.optim.lr_scheduler import _LRScheduler
 
 def set_seed(RANDOM_SEED):
     torch.manual_seed(RANDOM_SEED)
-    torch.cuda.manual_seed(RANDOM_SEED)
-    torch.backends.cudnn.deterministic = True
-    torch.backends.cudnn.benchmark = False
+    if torch.cuda.is_available():
+	    torch.cuda.manual_seed(RANDOM_SEED)
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
     np.random.seed(RANDOM_SEED)
     random.seed(RANDOM_SEED)
 

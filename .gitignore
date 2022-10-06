@@ -1,3 +1,5 @@
-__pycache__/
-*.npy
-*.pt
+data/nela/*.npy
+data/yh/*.npy
+save_checkpoint/*.pt
+save_embedding/*.npy
+
